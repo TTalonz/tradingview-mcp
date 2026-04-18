@@ -127,3 +127,36 @@ Claude Code ←→ MCP Server (stdio) ←→ CDP (localhost:9222) ←→ Trading
 ```
 
 Pine graphics path: `study._graphics._primitivesCollection.dwglines.get('lines').get(false)._primitivesDataById`
+
+---
+
+# TDU Algo System Core Rules
+
+## Pivot System
+- Pivots are manually placed on chart
+- Read strictly left to right
+- Map internally as P0 P1 P2 P3 P4 P5
+- Never assume missing pivots
+- Never generate pivots
+
+## Execution Rules
+- One tool at a time
+- Wait after each tool
+- No combining tools
+- No extra logic
+- No validation layer
+- No tracking or alerts
+- Speed over perfection
+
+## Tool Rules
+- All tools must anchor strictly to pivots
+- No inferred anchors
+- No adjustments beyond defined pivots
+
+## Pattern Execution
+- Patterns are modular
+- Each pattern lives in its own file
+- Only execute pattern when explicitly triggered
+
+## Command Trigger Format
+- `run impulse tdu`

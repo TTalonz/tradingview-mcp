@@ -44,6 +44,28 @@ register('draw', {
       description: 'Remove all algo drawings, keep flags',
       handler: () => core.clearAlgoDrawings(),
     }],
+    ['pivots-fix', {
+      description: 'Reposition live flag objects to their saved pivot coords in pivots.json',
+      options: {
+        id: { type: 'string', description: 'Entity ID of specific flag to fix' },
+      },
+      handler: (opts) => core.fixPivots({ id: opts.id }),
+    }],
+    ['pivots-save', {
+      description: 'Save all flag pivot coordinates from TradingView to pivots.json (use on reference timeframe)',
+      handler: () => core.savePivots(),
+    }],
+    ['pivots-snap', {
+      description: 'Snap live flags to nearest OHLC price on current timeframe bars',
+      handler: () => core.snapPivots(),
+    }],
+    ['pivots-clear', {
+      description: 'Clear saved pivot records — all, or by --id',
+      options: {
+        id: { type: 'string', description: 'Entity ID of specific pivot to clear' },
+      },
+      handler: (opts) => core.clearPivots({ id: opts.id }),
+    }],
     ['impulse', {
       description: 'Run Elliott Impulse pattern: read 6 flags → draw 6 tools',
       handler: () => core.runImpulse(),
@@ -54,6 +76,34 @@ register('draw', {
         degree: { type: 'string', description: 'Degree 1–4: filter flags by D-N color (derived left→right by first unique color)' },
       },
       handler: (opts) => core.runTduAlgo({ degree: opts.degree != null ? Number(opts.degree) : undefined }),
+    }],
+    ['tdu-refresh', {
+      description: 'Clear algo drawings and redraw TDU from saved pivots',
+      options: {
+        degree: { type: 'string', description: 'Degree 1–4' },
+      },
+      handler: (opts) => core.refreshTdu({ degree: opts.degree != null ? Number(opts.degree) : undefined }),
+    }],
+    ['gz-refresh', {
+      description: 'Clear algo drawings and redraw GZ from saved pivots',
+      options: {
+        degree: { type: 'string', description: 'Degree 1–4' },
+      },
+      handler: (opts) => core.refreshGz({ degree: opts.degree != null ? Number(opts.degree) : undefined }),
+    }],
+    ['tdu-sync', {
+      description: 'Full sync: snap pivots → clear algo → redraw TDU on current timeframe',
+      options: {
+        degree: { type: 'string', description: 'Degree 1–4' },
+      },
+      handler: (opts) => core.syncTdu({ degree: opts.degree != null ? Number(opts.degree) : undefined }),
+    }],
+    ['gz-sync', {
+      description: 'Full sync: snap pivots → clear algo → redraw GZ on current timeframe',
+      options: {
+        degree: { type: 'string', description: 'Degree 1–4' },
+      },
+      handler: (opts) => core.syncGz({ degree: opts.degree != null ? Number(opts.degree) : undefined }),
     }],
     ['gz', {
       description: 'GZ pattern: 2 flags → TDU fib + GZ box (projected time)',

@@ -26,6 +26,21 @@ node src/cli/index.js draw gz --degree 3
 node src/cli/index.js draw gz --degree 4
 ```
 
+## Refresh Command
+
+Clears stale algo drawings, then redraws GZ from saved pivots (`pivots.json`).
+
+```bash
+node src/cli/index.js draw gz-refresh --degree 1
+node src/cli/index.js draw gz-refresh --degree 2
+node src/cli/index.js draw gz-refresh --degree 3
+node src/cli/index.js draw gz-refresh --degree 4
+```
+
+- Uses saved pivots automatically — does not re-read TradingView flag coords
+- Runs `clear-algo` first, then redraws
+- Use after timeframe changes to restore the pattern from stable coords
+
 Implemented in `src/core/drawing.js` → `runGzPattern()`
 
 ---

@@ -14,7 +14,7 @@ const DRAW_TOOLS = {
     'flat_bottom',
   ],
   fibonacci: [
-    'fibonacci_retracement', 'fibonacci_extension',
+    'fibonacci_retracement', 'fib_trend_ext',
     'fib_channel', 'fib_circles', 'fib_spiral',
     'fib_speed_resistance_fan', 'fib_speed_resistance_arcs',
     'fib_timezone', 'fib_wedge',

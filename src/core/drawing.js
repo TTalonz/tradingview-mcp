@@ -1,6 +1,8 @@
 /**
  * Core drawing logic.
  */
+import { readFileSync, writeFileSync, existsSync } from 'fs';
+import { join } from 'path';
 import { evaluate as _evaluate, getChartApi as _getChartApi, safeString, requireFinite } from '../connection.js';
 
 // ── Resolution helper ─────────────────────────────────────────────────────────
@@ -90,6 +92,229 @@ const TDU_LEVEL_PROPERTIES = {
   level24: [-1.618, 'rgba(246, 178, 107, 1)',  false, ''],
 };
 
+// ── Pivot record persistence ──────────────────────────────────────────────────
+const PIVOTS_FILE = join(process.cwd(), 'pivots.json');
+
+function loadPivotRecords() {
+  if (!existsSync(PIVOTS_FILE)) return {};
+  try { return JSON.parse(readFileSync(PIVOTS_FILE, 'utf8')); } catch { return {}; }
+}
+
+function writePivotRecords(records) {
+  writeFileSync(PIVOTS_FILE, JSON.stringify(records, null, 2), 'utf8');
+}
+
+export async function savePivots({ _deps } = {}) {
+  const { shapes } = await listDrawings(_deps);
+  const flagShapes = shapes.filter(s => s.name === 'flag');
+
+  const liveFlags = [];
+  for (const { id } of flagShapes) {
+    const props = await getProperties({ entity_id: id, _deps });
+    if (props.points?.[0]) {
+      const color = props.properties?.flagColor || null;
+      const degreeEntry = Object.entries(DEGREE_COLOR_MAP).find(([, c]) => c === color);
+      liveFlags.push({
+        id,
+        time:   props.points[0].time,
+        price:  props.points[0].price,
+        color,
+        degree: degreeEntry ? Number(degreeEntry[0]) : null,
+      });
+    }
+  }
+
+  const existing = loadPivotRecords();
+  const liveIds = new Set(liveFlags.map(f => f.id));
+  const orphaned = Object.keys(existing).filter(id => !liveIds.has(id));
+
+  const records = {};
+  for (const f of liveFlags) records[f.id] = f;
+  writePivotRecords(records);
+
+  return {
+    success: true,
+    saved: liveFlags.length,
+    orphaned: orphaned.length ? orphaned : [],
+    warning: orphaned.length ? `Orphaned records removed: ${orphaned.join(', ')}` : null,
+  };
+}
+
+export async function fixPivots({ id, _deps } = {}) {
+  const { evaluate } = _resolve(_deps);
+  const apiPath = await (_deps?.getChartApi || _getChartApi)();
+  const saved = loadPivotRecords();
+
+  // Get live flags from chart
+  const { shapes } = await listDrawings(_deps);
+  const liveFlags = new Map(shapes.filter(s => s.name === 'flag').map(s => [s.id, s]));
+
+  // Determine which records to process
+  const targets = id
+    ? (saved[id] ? [saved[id]] : [])
+    : Object.values(saved);
+
+  if (id && !saved[id]) throw new Error(`No saved pivot record for id: ${id}`);
+
+  const fixed = [];
+  const skipped = [];   // live flag exists but no saved record (only relevant in full run)
+  const missing = [];   // saved record exists but flag not on chart
+  const unfixable = []; // setPoints failed
+
+  for (const record of targets) {
+    if (!liveFlags.has(record.id)) {
+      missing.push(record.id);
+      continue;
+    }
+    try {
+      const result = await evaluate(`
+        (function() {
+          var shape = ${apiPath}.getShapeById(${JSON.stringify(record.id)});
+          if (!shape || typeof shape.setPoints !== 'function') return 'no_setPoints';
+          shape.setPoints([{ time: ${record.time}, price: ${record.price} }]);
+          return 'ok';
+        })()
+      `);
+      if (result === 'no_setPoints') {
+        unfixable.push({ id: record.id, reason: 'setPoints not supported' });
+      } else {
+        fixed.push(record.id);
+      }
+    } catch (err) {
+      unfixable.push({ id: record.id, reason: err.message });
+    }
+  }
+
+  // Report live flags with no saved record (full run only)
+  if (!id) {
+    for (const liveId of liveFlags.keys()) {
+      if (!saved[liveId]) skipped.push(liveId);
+    }
+  }
+
+  return { success: true, fixed, skipped, missing, unfixable };
+}
+
+export async function snapPivots({ _deps } = {}) {
+  const { evaluate, getChartApi } = _resolve(_deps);
+  const apiPath = await getChartApi();
+
+  const saved = loadPivotRecords();
+  const records = Object.values(saved);
+  if (!records.length) return { success: true, snapped: [], missing: [], failed: [], message: 'No saved pivots' };
+
+  const { shapes } = await listDrawings(_deps);
+  const liveFlags = new Set(shapes.filter(s => s.name === 'flag').map(s => s.id));
+
+  const snapped = [];
+  const missing = [];
+  const failed = [];
+
+  for (const record of records) {
+    if (!liveFlags.has(record.id)) {
+      missing.push(record.id);
+      continue;
+    }
+
+    const moveResult = await evaluate(`
+      (function() {
+        var savedTime  = ${record.time};
+        var savedPrice = ${record.price};
+        var windowEnd  = savedTime + 86400;
+
+        var col = window._exposed_chartWidgetCollection;
+        if (!col) return 'no_col';
+        var w = col.activeChartWidget && col.activeChartWidget.value ? col.activeChartWidget.value() : null;
+        if (!w) return 'no_widget';
+        var model = w.model ? w.model() : null;
+        if (!model) return 'no_model';
+        var ts     = model.timeScale ? model.timeScale() : null;
+        var series = model.mainSeries ? model.mainSeries() : null;
+        var bars   = series ? series.bars() : null;
+
+        // Scan bars within [savedTime, savedTime + 86400) — the original 1D candle window
+        // Find the bar where any OHLC is closest to savedPrice
+        var bestBar   = null;
+        var bestDelta = Infinity;
+        if (bars) {
+          var lastIdx = bars.lastIndex();
+          for (var i = lastIdx; i >= 0; i--) {
+            var v = bars.valueAt(i);
+            if (!v) continue;
+            var bt = v[0];
+            if (bt >= windowEnd) continue;
+            if (bt < savedTime) break;
+            // v: [time, open, high, low, close]
+            var d = Math.min(
+              Math.abs(savedPrice - v[1]),
+              Math.abs(savedPrice - v[2]),
+              Math.abs(savedPrice - v[3]),
+              Math.abs(savedPrice - v[4])
+            );
+            if (d < bestDelta) { bestDelta = d; bestBar = v; }
+          }
+        }
+
+        var targetTime = bestBar ? bestBar[0] : savedTime;
+        var barIndex   = ts && ts.timePointToIndex ? ts.timePointToIndex(targetTime) : null;
+
+        var sources = model.dataSources ? model.dataSources() : [];
+        for (var i = 0; i < sources.length; i++) {
+          var s = sources[i];
+          if (s.id && s.id() === ${JSON.stringify(record.id)}) {
+            if (typeof s.setPoint === 'function') {
+              var pt = { time: targetTime, price: savedPrice };
+              if (barIndex != null) pt.index = barIndex;
+              s.setPoint(0, pt);
+              if (typeof s.pointsetUpdated === 'function') s.pointsetUpdated();
+              if (typeof s._updateAllPaneViews === 'function') s._updateAllPaneViews();
+              return { ok: true, targetTime: targetTime, barIndex: barIndex, priceDelta: bestDelta };
+            }
+            return 'no_setPoint';
+          }
+        }
+        return 'not_found';
+      })()
+    `);
+
+    if (moveResult?.ok) {
+      snapped.push({
+        id:        record.id,
+        price:     record.price,
+        savedTime: record.time,
+        targetTime: moveResult.targetTime,
+        barIndex:  moveResult.barIndex,
+        priceDelta: moveResult.priceDelta,
+      });
+    } else {
+      failed.push({ id: record.id, reason: moveResult });
+    }
+  }
+
+  // Update pivots.json with snapped targetTimes so pattern draws anchor to the same bars
+  if (snapped.length) {
+    const updated = loadPivotRecords();
+    for (const s of snapped) {
+      if (updated[s.id]) updated[s.id].time = s.targetTime;
+    }
+    writePivotRecords(updated);
+  }
+
+  return { success: true, snapped, missing, failed };
+}
+
+export async function clearPivots({ id } = {}) {
+  const records = loadPivotRecords();
+  if (id) {
+    if (!records[id]) throw new Error(`No saved pivot record for id: ${id}`);
+    delete records[id];
+    writePivotRecords(records);
+    return { success: true, cleared: [id] };
+  }
+  writePivotRecords({});
+  return { success: true, cleared: 'all' };
+}
+
 // ── Degree-based flag selection ───────────────────────────────────────────────
 // Fixed color-to-degree map based on user workflow.
 // degree=undefined → returns all flags (existing behavior).
@@ -103,17 +328,24 @@ const DEGREE_COLOR_MAP = {
 export async function getFlagsByDegree({ degree, minCount = 3, _deps } = {}) {
   const { shapes } = await listDrawings(_deps);
   const flagShapes = shapes.filter(s => s.name === 'flag');
+  const saved = loadPivotRecords();
 
   const flags = [];
   for (const { id } of flagShapes) {
-    const props = await getProperties({ entity_id: id, _deps });
-    if (props.points?.[0]) {
-      flags.push({
-        id,
-        time:  props.points[0].time,
-        price: props.points[0].price,
-        color: props.properties?.flagColor || null,
-      });
+    if (saved[id]) {
+      // Use saved pivot record — timeframe-stable
+      flags.push(saved[id]);
+    } else {
+      // Fall back to live TradingView read
+      const props = await getProperties({ entity_id: id, _deps });
+      if (props.points?.[0]) {
+        flags.push({
+          id,
+          time:  props.points[0].time,
+          price: props.points[0].price,
+          color: props.properties?.flagColor || null,
+        });
+      }
     }
   }
   flags.sort((a, b) => a.time - b.time);
@@ -581,6 +813,32 @@ export async function runTduAlgo({ degree, _deps } = {}) {
     fib: fib.entity_id,
     gz: gz.entity_id,
   };
+}
+
+// ── Refresh helpers ───────────────────────────────────────────────────────────
+export async function refreshTdu({ degree, _deps } = {}) {
+  await clearAlgoDrawings(_deps);
+  return runTduAlgo({ degree, _deps });
+}
+
+export async function refreshGz({ degree, _deps } = {}) {
+  await clearAlgoDrawings(_deps);
+  return runGzPattern({ degree, _deps });
+}
+
+// ── Sync helpers (snap + clear + redraw) ──────────────────────────────────────
+export async function syncTdu({ degree, _deps } = {}) {
+  await snapPivots({ _deps });
+  await new Promise(r => setTimeout(r, 300));
+  await clearAlgoDrawings(_deps);
+  return runTduAlgo({ degree, _deps });
+}
+
+export async function syncGz({ degree, _deps } = {}) {
+  await snapPivots({ _deps });
+  await new Promise(r => setTimeout(r, 300));
+  await clearAlgoDrawings(_deps);
+  return runGzPattern({ degree, _deps });
 }
 
 // ── GZ pattern — 2-flag fib + GZ box ─────────────────────────────────────────
