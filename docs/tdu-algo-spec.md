@@ -2,13 +2,33 @@
 
 > **This behavior is locked. Do not change any part of this spec unless explicitly requested.**
 
+## Operator Aliases
+
+The following shorthand phrases all mean the same thing — run the TDU algo:
+
+| Phrase | Executes |
+|---|---|
+| `algo` | `node src/cli/index.js draw tdu` |
+| `run algo` | `node src/cli/index.js draw tdu` |
+| `run tdu algo` | `node src/cli/index.js draw tdu` |
+| `tdu algo` | `node src/cli/index.js draw tdu` |
+
+---
+
 ## CLI Command
 
-```
+```bash
+# All flags (default — existing behavior)
 node src/cli/index.js draw tdu
+
+# Degree-filtered
+node src/cli/index.js draw tdu --degree 1
+node src/cli/index.js draw tdu --degree 2
+node src/cli/index.js draw tdu --degree 3
+node src/cli/index.js draw tdu --degree 4
 ```
 
-Implemented in `src/core/drawing.js` → `runTduAlgo()`
+Implemented in `src/core/drawing.js` → `runTduAlgo()` / `getFlagsByDegree()`
 
 ---
 
@@ -18,6 +38,32 @@ Implemented in `src/core/drawing.js` → `runTduAlgo()`
 - Minimum required: 3 flags
 - Ordering: sorted left to right by timestamp
 - Assignment: P0 = earliest, P1 = middle, P2 = latest
+
+---
+
+## Degree-Based Flag Filtering (`--degree`)
+
+When `--degree N` is passed, flags are filtered to those matching the Nth unique color encountered left to right on the chart.
+
+**Degree map derivation:**
+1. Sort all flags left to right by time
+2. Walk left to right — first unique `flagColor` hex = D1, second = D2, third = D3, fourth = D4
+3. Filter flags to the color matching degree N
+4. Run existing pivot logic on that subset
+
+**Rules:**
+- Degree is derived dynamically at runtime — never hardcoded
+- Grouping is by exact `flagColor` hex value
+- No `--degree` = use all flags (unchanged behavior)
+- Minimum 3 flags required per degree
+
+**Errors:**
+```
+Degree {N} not found — only {count} degrees on chart
+Degree {N} (color {hex}) has only {count} flags, need at least 3
+```
+
+**Helper:** `getFlagsByDegree({ degree, minCount, _deps })` — exported and reusable for future patterns with different `minCount` requirements.
 
 ---
 
