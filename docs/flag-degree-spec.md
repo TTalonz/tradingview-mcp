@@ -33,10 +33,10 @@ Matching is by exact string. Map is never derived dynamically.
 
 Each pattern declares how many flags it needs. Degree selection must satisfy that minimum.
 
-| Pattern | Flags required | CLI |
-|---|---|---|
-| TDU algo | 3 | `draw tdu` |
-| GZ | 2 | `draw gz` |
+| Pattern | Flags required | CLI | Spec |
+|---|---|---|---|
+| TDU algo | 3 | `draw tdu` | `docs/tdu-algo-spec.md` |
+| TDU GZ | 2 | `draw gz` | `docs/gz-spec.md` |
 
 ---
 
