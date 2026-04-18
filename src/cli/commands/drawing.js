@@ -50,7 +50,10 @@ register('draw', {
     }],
     ['tdu', {
       description: 'Run TDU algo: read flags → draw pitchfork + fib',
-      handler: () => core.runTduAlgo(),
+      options: {
+        degree: { type: 'string', description: 'Degree 1–4: filter flags by D-N color (derived left→right by first unique color)' },
+      },
+      handler: (opts) => core.runTduAlgo({ degree: opts.degree != null ? Number(opts.degree) : undefined }),
     }],
     ['tdu-fib', {
       description: 'Draw TDU fib retracement from ordered flag pivots (P0, P1, P2)',

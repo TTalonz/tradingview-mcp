@@ -90,26 +90,64 @@ const TDU_LEVEL_PROPERTIES = {
   level24: [-1.618, 'rgba(246, 178, 107, 1)',  false, ''],
 };
 
-export async function drawTduFib({ _deps } = {}) {
-  const { evaluate, getChartApi } = _resolve(_deps);
-  const apiPath = await getChartApi();
-
-  // 1. Read all shapes, filter to flags, fetch time+price via getProperties
+// ── Degree-based flag selection ───────────────────────────────────────────────
+// Reads all flags, sorts left→right, derives D1–D4 from first unique color appearance.
+// degree=undefined → returns all flags (existing behavior).
+export async function getFlagsByDegree({ degree, minCount = 3, _deps } = {}) {
   const { shapes } = await listDrawings(_deps);
   const flagShapes = shapes.filter(s => s.name === 'flag');
-  if (flagShapes.length < 3) throw new Error(`Need at least 3 flag pivots, found ${flagShapes.length}`);
 
   const flags = [];
   for (const { id } of flagShapes) {
-    const { points } = await getProperties({ entity_id: id, _deps });
-    if (points?.[0]) flags.push({ id, time: points[0].time, price: points[0].price });
+    const props = await getProperties({ entity_id: id, _deps });
+    if (props.points?.[0]) {
+      flags.push({
+        id,
+        time:  props.points[0].time,
+        price: props.points[0].price,
+        color: props.properties?.flagColor || null,
+      });
+    }
+  }
+  flags.sort((a, b) => a.time - b.time);
+
+  if (degree == null) {
+    if (flags.length < minCount) throw new Error(`Need at least ${minCount} flag pivots, found ${flags.length}`);
+    return flags;
   }
 
-  if (flags.length < 3) throw new Error(`Need at least 3 flag pivots with points, found ${flags.length}`);
+  // Build degree map: first unique color = D1, second = D2, etc.
+  const degreeMap = {};
+  let count = 0;
+  const seen = new Set();
+  for (const f of flags) {
+    if (f.color && !seen.has(f.color)) {
+      seen.add(f.color);
+      degreeMap[++count] = f.color;
+    }
+  }
 
-  // 2. Sort left to right, assign P0 P1 P2
-  flags.sort((a, b) => a.time - b.time);
-  const [P0, P1, P2] = flags;
+  const N = Number(degree);
+  if (!degreeMap[N]) {
+    throw new Error(`Degree ${N} not found — only ${count} degree${count !== 1 ? 's' : ''} on chart`);
+  }
+
+  const targetColor = degreeMap[N];
+  const filtered = flags.filter(f => f.color === targetColor);
+
+  if (filtered.length < minCount) {
+    throw new Error(`Degree ${N} (color ${targetColor}) has only ${filtered.length} flag${filtered.length !== 1 ? 's' : ''}, need at least ${minCount}`);
+  }
+
+  return filtered;
+}
+
+export async function drawTduFib({ degree, _deps } = {}) {
+  const { evaluate, getChartApi } = _resolve(_deps);
+  const apiPath = await getChartApi();
+
+  // 1. Read flags filtered by degree (or all if no degree)
+  const [P0, P1, P2] = await getFlagsByDegree({ degree, minCount: 3, _deps });
 
   // 3. TDU fib anchors: anchor1=(P1.time, P0.price), anchor2=(P2.time, P1.price)
   const anchor1 = { time: P1.time, price: P0.price };
@@ -491,21 +529,9 @@ export async function runImpulse({ _deps } = {}) {
 
 // ── TDU algo — lean placement only ───────────────────────────────────────────
 // Read flags → sort → draw pitchfork + TDU fib. No tracking, no screenshots.
-export async function runTduAlgo({ _deps } = {}) {
-  // 1. Read flags and sort left to right
-  const { shapes } = await listDrawings(_deps);
-  const flagShapes = shapes.filter(s => s.name === 'flag');
-  if (flagShapes.length < 3) throw new Error(`Need at least 3 flag pivots, found ${flagShapes.length}`);
-
-  const flags = [];
-  for (const { id } of flagShapes) {
-    const { points } = await getProperties({ entity_id: id, _deps });
-    if (points?.[0]) flags.push({ id, time: points[0].time, price: points[0].price });
-  }
-  if (flags.length < 3) throw new Error(`Need at least 3 flag pivots with points, found ${flags.length}`);
-
-  flags.sort((a, b) => a.time - b.time);
-  const [P0, P1, P2] = flags;
+export async function runTduAlgo({ degree, _deps } = {}) {
+  // 1. Read flags filtered by degree (or all if no degree)
+  const [P0, P1, P2] = await getFlagsByDegree({ degree, minCount: 3, _deps });
 
   // 2. Draw pitchfork: P0 = handle, P1 = left tine, P2 = right tine
   //    level5 (coeff 1.0) enabled via setProperties — createMultipointShape ignores level arrays
@@ -532,7 +558,7 @@ export async function runTduAlgo({ _deps } = {}) {
   }
 
   // 3. Draw TDU fib (reads flags internally, same pivot order)
-  const fib = await drawTduFib({ _deps });
+  const fib = await drawTduFib({ degree, _deps });
 
   // 4. GZ box: 0.5 → 0.65 fib levels, subdued yellow, no label
   //    fib goes anchor2.price → anchor1.price, so: level = anchor2.price - coeff × range
