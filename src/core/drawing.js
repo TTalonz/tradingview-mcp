@@ -91,8 +91,15 @@ const TDU_LEVEL_PROPERTIES = {
 };
 
 // ── Degree-based flag selection ───────────────────────────────────────────────
-// Reads all flags, sorts left→right, derives D1–D4 from first unique color appearance.
+// Fixed color-to-degree map based on user workflow.
 // degree=undefined → returns all flags (existing behavior).
+const DEGREE_COLOR_MAP = {
+  1: 'rgba(242, 54, 69, 1)',   // red
+  2: 'rgba(128, 128, 128, 1)', // gray
+  3: 'rgba(251, 192, 45, 1)',  // yellow
+  4: 'rgba(41, 98, 255, 1)',   // blue
+};
+
 export async function getFlagsByDegree({ degree, minCount = 3, _deps } = {}) {
   const { shapes } = await listDrawings(_deps);
   const flagShapes = shapes.filter(s => s.name === 'flag');
@@ -116,23 +123,12 @@ export async function getFlagsByDegree({ degree, minCount = 3, _deps } = {}) {
     return flags;
   }
 
-  // Build degree map: first unique color = D1, second = D2, etc.
-  const degreeMap = {};
-  let count = 0;
-  const seen = new Set();
-  for (const f of flags) {
-    if (f.color && !seen.has(f.color)) {
-      seen.add(f.color);
-      degreeMap[++count] = f.color;
-    }
-  }
-
   const N = Number(degree);
-  if (!degreeMap[N]) {
-    throw new Error(`Degree ${N} not found — only ${count} degree${count !== 1 ? 's' : ''} on chart`);
+  const targetColor = DEGREE_COLOR_MAP[N];
+  if (!targetColor) {
+    throw new Error(`Degree ${N} not found — valid degrees are 1 (red), 2 (gray), 3 (yellow), 4 (blue)`);
   }
 
-  const targetColor = degreeMap[N];
   const filtered = flags.filter(f => f.color === targetColor);
 
   if (filtered.length < minCount) {
@@ -582,6 +578,65 @@ export async function runTduAlgo({ degree, _deps } = {}) {
       P2: { id: P2.id, time: P2.time, price: P2.price },
     },
     pitchfork: pitchfork.entity_id,
+    fib: fib.entity_id,
+    gz: gz.entity_id,
+  };
+}
+
+// ── GZ pattern — 2-flag fib + GZ box ─────────────────────────────────────────
+// P0 = first flag, P1 = second flag (left to right)
+// anchor1 = (P1.time, P0.price), anchor2 = (P1.time + span, P1.price)
+// where span = P1.time - P0.time
+export async function runGzPattern({ degree, _deps } = {}) {
+  const { evaluate, getChartApi } = _resolve(_deps);
+  const apiPath = await getChartApi();
+
+  // 1. Read 2 flags (filtered by degree if provided)
+  const flags = await getFlagsByDegree({ degree, minCount: 2, _deps });
+  const [P0, P1] = flags;
+
+  // 2. Compute anchors
+  const span = P1.time - P0.time;
+  const anchor1 = { time: P1.time,          price: P0.price };
+  const anchor2 = { time: P1.time + span,   price: P1.price };
+
+  // 3. Draw TDU fib with overrides
+  const fib = await drawShape({
+    shape: 'fib_retracement',
+    points: [anchor1, anchor2],
+    overrides: JSON.stringify(TDU_FIB_OVERRIDES),
+    _deps,
+  });
+  if (fib.entity_id) {
+    await evaluate(`
+      (function() {
+        var shape = ${apiPath}.getShapeById(${JSON.stringify(fib.entity_id)});
+        if (shape && typeof shape.setProperties === 'function') {
+          shape.setProperties(${JSON.stringify(TDU_LEVEL_PROPERTIES)});
+        }
+      })()
+    `);
+  }
+
+  // 4. GZ box: 0.5 → 0.65 levels, same style as TDU algo
+  //    fib renders anchor2.price → anchor1.price, so: level = anchor2.price - coeff × range
+  const range = anchor2.price - anchor1.price;
+  const gz50 = anchor2.price - 0.50 * range;
+  const gz65 = anchor2.price - 0.65 * range;
+  const gz = await drawShape({
+    shape: 'rectangle',
+    points: [{ time: anchor1.time, price: gz50 }, { time: anchor2.time, price: gz65 }],
+    overrides: JSON.stringify({ backgroundColor: 'rgba(255, 220, 0, 0.12)', color: 'rgba(255, 220, 0, 0.4)', linewidth: 1 }),
+    _deps,
+  });
+
+  return {
+    success: true,
+    pivots: {
+      P0: { id: P0.id, time: P0.time, price: P0.price },
+      P1: { id: P1.id, time: P1.time, price: P1.price },
+    },
+    anchors: { anchor1, anchor2 },
     fib: fib.entity_id,
     gz: gz.entity_id,
   };
