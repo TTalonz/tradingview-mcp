@@ -55,6 +55,13 @@ register('draw', {
       },
       handler: (opts) => core.runTduAlgo({ degree: opts.degree != null ? Number(opts.degree) : undefined }),
     }],
+    ['gz', {
+      description: 'GZ pattern: 2 flags → TDU fib + GZ box (projected time)',
+      options: {
+        degree: { type: 'string', description: 'Filter flags by degree color (1–4)' },
+      },
+      handler: (opts) => core.runGzPattern({ degree: opts.degree != null ? Number(opts.degree) : undefined }),
+    }],
     ['tdu-fib', {
       description: 'Draw TDU fib retracement from ordered flag pivots (P0, P1, P2)',
       handler: () => core.drawTduFib(),
