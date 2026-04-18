@@ -43,27 +43,15 @@ Implemented in `src/core/drawing.js` → `runTduAlgo()` / `getFlagsByDegree()`
 
 ## Degree-Based Flag Filtering (`--degree`)
 
-When `--degree N` is passed, flags are filtered to those matching the Nth unique color encountered left to right on the chart.
+See `docs/flag-degree-spec.md` for the full shared architecture.
 
-**Degree map derivation:**
-1. Sort all flags left to right by time
-2. Walk left to right — first unique `flagColor` hex = D1, second = D2, third = D3, fourth = D4
-3. Filter flags to the color matching degree N
-4. Run existing pivot logic on that subset
-
-**Rules:**
-- Degree is derived dynamically at runtime — never hardcoded
-- Grouping is by exact `flagColor` hex value
-- No `--degree` = use all flags (unchanged behavior)
-- Minimum 3 flags required per degree
+TDU algo is a **3-flag pattern**. When `--degree N` is passed, only flags of that degree color are used. Pivot assignment (P0, P1, P2) is from the filtered, left-to-right sorted set.
 
 **Errors:**
 ```
-Degree {N} not found — only {count} degrees on chart
+Degree {N} not found — valid degrees are 1 (red), 2 (gray), 3 (yellow), 4 (blue)
 Degree {N} (color {hex}) has only {count} flags, need at least 3
 ```
-
-**Helper:** `getFlagsByDegree({ degree, minCount, _deps })` — exported and reusable for future patterns with different `minCount` requirements.
 
 ---
 
