@@ -1,6 +1,6 @@
 import { register } from '../router.js';
 import * as core from '../../core/drawing.js';
-import { updateWatcherState, ensureWatcher, stopWatcher, readState, clearWatcherPairs, placeWatcherMarker, STATE_FILE } from '../../core/watcher.js';
+import { updateWatcherState, ensureWatcher, stopWatcher, readState, clearWatcherPairs, placeWatcherMarker, storePlantChartId, STATE_FILE } from '../../core/watcher.js';
 import { writeFileSync, existsSync } from 'fs';
 
 register('draw', {
@@ -87,6 +87,7 @@ register('draw', {
         await core.savePivots();
         const result = await core.runTduAlgo({ degree });
         updateWatcherState(degree ?? null, 'tdu');
+        await storePlantChartId();
         ensureWatcher();
         await placeWatcherMarker();
         return result;
@@ -102,6 +103,7 @@ register('draw', {
         await core.savePivots();
         const result = await core.refreshTdu({ degree });
         updateWatcherState(degree ?? null, 'tdu');
+        await storePlantChartId();
         ensureWatcher();
         await placeWatcherMarker();
         return result;
@@ -117,6 +119,7 @@ register('draw', {
         await core.savePivots();
         const result = await core.refreshGz({ degree });
         updateWatcherState(degree ?? null, 'gz');
+        await storePlantChartId();
         ensureWatcher();
         await placeWatcherMarker();
         return result;
@@ -133,6 +136,7 @@ register('draw', {
         await core.savePivots();
         const result = await core.syncTdu({ degree, noClear: !!opts['no-clear'] });
         updateWatcherState(degree ?? null, 'tdu');
+        await storePlantChartId();
         ensureWatcher();
         await placeWatcherMarker();
         return result;
@@ -149,6 +153,7 @@ register('draw', {
         await core.savePivots();
         const result = await core.syncGz({ degree, noClear: !!opts['no-clear'] });
         updateWatcherState(degree ?? null, 'gz');
+        await storePlantChartId();
         ensureWatcher();
         await placeWatcherMarker();
         return result;
@@ -166,6 +171,7 @@ register('draw', {
         await core.savePivots();
         const result = await core.runGzPattern({ degree, from });
         updateWatcherState(degree ?? null, 'gz');
+        await storePlantChartId();
         ensureWatcher();
         await placeWatcherMarker();
         return result;
@@ -176,6 +182,7 @@ register('draw', {
       handler: async () => {
         const saved = await core.savePivots();
         if (!existsSync(STATE_FILE)) writeFileSync(STATE_FILE, JSON.stringify({ pairs: [] }, null, 2), 'utf8');
+        await storePlantChartId();
         ensureWatcher();
         await placeWatcherMarker();
         return { success: true, action: 'plant', pivots_saved: saved.saved, state: readState() };

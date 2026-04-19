@@ -7,7 +7,7 @@ import { readFileSync, writeFileSync, existsSync, unlinkSync, openSync } from 'f
 import { join } from 'path';
 import { spawn } from 'child_process';
 import { pathToFileURL } from 'url';
-import { evaluate, getChartApi } from '../connection.js';
+import { evaluate, getChartApi, getTargetInfo, probeEval } from '../connection.js';
 import { snapPivots, clearAlgoDrawings, runTduAlgo, runGzPattern, drawShape, removeOne } from './drawing.js';
 
 export const PID_FILE    = join(process.cwd(), 'watcher.pid');
@@ -75,6 +75,44 @@ export function clearWatcherPairs() {
   const state = readState();
   state.pairs = [];
   writeState(state);
+}
+
+const CDP_PORT = 9222;
+
+/**
+ * Return the chart_id of the single visible chart tab, or null if ambiguous.
+ * Uses visibilityState — only returns a value when exactly one chart is visible.
+ * In split-pane layouts where multiple charts are visible, returns null (safe: no unplant).
+ */
+async function getActiveFocusedChartId() {
+  try {
+    const resp = await fetch(`http://localhost:${CDP_PORT}/json/list`);
+    const targets = await resp.json();
+    const charts = targets.filter(t => t.type === 'page' && /tradingview\.com\/chart/i.test(t.url));
+    if (charts.length === 0) return null;
+    if (charts.length === 1) return charts[0].url.match(/\/chart\/([^/?]+)/)?.[1] || null;
+    const visible = [];
+    for (const t of charts) {
+      const state = await probeEval(t.id, 'document.visibilityState');
+      if (state === 'visible') visible.push(t);
+    }
+    if (visible.length === 1) return visible[0].url.match(/\/chart\/([^/?]+)/)?.[1] || null;
+  } catch {}
+  return null;
+}
+
+/** Read the current CDP target's chart_id and persist it to watcher-state.json. */
+export async function storePlantChartId() {
+  try {
+    const info = await getTargetInfo();
+    const chart_id = info?.url?.match(/\/chart\/([^/?]+)/)?.[1] || null;
+    if (chart_id) {
+      const state = readState();
+      state.chart_id = chart_id;
+      writeState(state);
+    }
+    return chart_id;
+  } catch { return null; }
 }
 
 /** Upsert a degree→pattern pair. Last write wins per degree. */
@@ -188,6 +226,7 @@ async function pollLoop() {
   const apiPath = await getChartApi();
   let lastTf  = await evaluate(`${apiPath}.resolution()`);
   let lastSym = await evaluate(`${apiPath}.symbol()`);
+  const { chart_id: plantedChartId = null } = readState();
   let errorCount = 0;
 
   process.stderr.write(`[watcher] started — tf=${lastTf} sym=${lastSym}\n`);
@@ -203,6 +242,14 @@ async function pollLoop() {
       if (sym !== lastSym) {
         await autoUnplant(`symbol changed ${lastSym} → ${sym}`);
         return;
+      }
+
+      if (plantedChartId) {
+        const activeChartId = await getActiveFocusedChartId();
+        if (activeChartId && activeChartId !== plantedChartId) {
+          await autoUnplant('chart changed');
+          return;
+        }
       }
 
       if (tf !== lastTf) {

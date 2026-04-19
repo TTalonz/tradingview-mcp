@@ -127,7 +127,7 @@ export async function connect(preferredSymbol = null) {
   throw new Error(`CDP connection failed after ${MAX_RETRIES} attempts: ${lastError?.message}`);
 }
 
-async function probeEval(targetId, expression) {
+export async function probeEval(targetId, expression) {
   let probe;
   try {
     probe = await CDP({ host: CDP_HOST, port: CDP_PORT, target: targetId });
