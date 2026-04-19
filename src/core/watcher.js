@@ -3,9 +3,9 @@
  * Exports updateWatcherState() and ensureWatcher() for use by pattern commands.
  * When run directly (node src/core/watcher.js), enters the polling loop.
  */
-import { readFileSync, writeFileSync, existsSync, unlinkSync, openSync } from 'fs';
+import { readFileSync, writeFileSync, existsSync, unlinkSync, openSync, writeSync } from 'fs';
 import { join } from 'path';
-import { spawn } from 'child_process';
+import { spawn, spawnSync } from 'child_process';
 import { pathToFileURL } from 'url';
 import { evaluate, getChartApi, getTargetInfo, probeEval } from '../connection.js';
 import { snapPivots, clearAlgoDrawings, runTduAlgo, runGzPattern, drawShape, removeOne } from './drawing.js';
@@ -80,37 +80,30 @@ export function clearWatcherPairs() {
 const CDP_PORT = 9222;
 
 /**
- * Return the chart_id of the single visible chart tab, or null if ambiguous.
- * Uses visibilityState — only returns a value when exactly one chart is visible.
- * In split-pane layouts where multiple charts are visible, returns null (safe: no unplant).
+ * Return the UUID (element id) of the active tab in the TV Desktop tab bar,
+ * read from the tabbed-window container. Changes on every TV tab switch
+ * regardless of symbol, CDP visibilityState, or OS focus.
  */
-async function getActiveFocusedChartId() {
+async function getActiveTabUuid() {
   try {
     const resp = await fetch(`http://localhost:${CDP_PORT}/json/list`);
     const targets = await resp.json();
-    const charts = targets.filter(t => t.type === 'page' && /tradingview\.com\/chart/i.test(t.url));
-    if (charts.length === 0) return null;
-    if (charts.length === 1) return charts[0].url.match(/\/chart\/([^/?]+)/)?.[1] || null;
-    const visible = [];
-    for (const t of charts) {
-      const state = await probeEval(t.id, 'document.visibilityState');
-      if (state === 'visible') visible.push(t);
-    }
-    if (visible.length === 1) return visible[0].url.match(/\/chart\/([^/?]+)/)?.[1] || null;
-  } catch {}
-  return null;
+    const container = targets.find(t => t.type === 'page' && /tabbed-window/i.test(t.url) && !/tooltip/i.test(t.url));
+    if (!container) return null;
+    return await probeEval(container.id, `document.querySelector('.tab.active')?.id || null`);
+  } catch { return null; }
 }
 
-/** Read the current CDP target's chart_id and persist it to watcher-state.json. */
+/** Store the planted tab UUID (and chart_id for logging) to watcher-state.json. */
 export async function storePlantChartId() {
   try {
+    const tab_uuid = await getActiveTabUuid();
     const info = await getTargetInfo();
     const chart_id = info?.url?.match(/\/chart\/([^/?]+)/)?.[1] || null;
-    if (chart_id) {
-      const state = readState();
-      state.chart_id = chart_id;
-      writeState(state);
-    }
+    const state = readState();
+    if (tab_uuid) state.tab_uuid = tab_uuid;
+    if (chart_id) state.chart_id = chart_id;
+    writeState(state);
     return chart_id;
   } catch { return null; }
 }
@@ -144,15 +137,11 @@ export function ensureWatcher() {
 
   const script = new URL(import.meta.url).pathname.replace(/^\/([A-Z]:)/, '$1');
   const logPath = join(process.cwd(), 'watcher.log');
-  const logFd = openSync(logPath, 'a');
-  const child = spawn(process.execPath, [script], {
-    detached: true,
-    stdio:    ['ignore', logFd, logFd],
-    env:      process.env,
-    cwd:      process.cwd(),
-  });
-  child.unref();
-  writeFileSync(PID_FILE, String(child.pid), 'utf8');
+  const pidPath = PID_FILE;
+  // Launch via bash background job — survives parent exit without cgroup tracking.
+  // spawnSync waits for bash to finish writing the PID before returning.
+  const cmd = `node "${script}" >> "${logPath}" 2>&1 & echo $! > "${pidPath}"`;
+  spawnSync('bash', ['-c', cmd], { stdio: 'ignore', env: process.env, cwd: process.cwd() });
 }
 
 /** Kill watcher and remove state files. */
@@ -226,7 +215,7 @@ async function pollLoop() {
   const apiPath = await getChartApi();
   let lastTf  = await evaluate(`${apiPath}.resolution()`);
   let lastSym = await evaluate(`${apiPath}.symbol()`);
-  const { chart_id: plantedChartId = null } = readState();
+  const { chart_id: plantedChartId = null, tab_uuid: plantedTabUuid = null } = readState();
   let errorCount = 0;
 
   process.stderr.write(`[watcher] started — tf=${lastTf} sym=${lastSym}\n`);
@@ -244,9 +233,9 @@ async function pollLoop() {
         return;
       }
 
-      if (plantedChartId) {
-        const activeChartId = await getActiveFocusedChartId();
-        if (activeChartId && activeChartId !== plantedChartId) {
+      if (plantedTabUuid) {
+        const activeTabUuid = await getActiveTabUuid();
+        if (activeTabUuid && activeTabUuid !== plantedTabUuid) {
           await autoUnplant('chart changed');
           return;
         }
@@ -277,12 +266,18 @@ const isMain = process.argv[1] &&
   pathToFileURL(process.argv[1]).href === new URL(import.meta.url).href;
 
 if (isMain) {
+  // Open our own log file so we're not dependent on an inherited fd from the parent
+  const _logPath = process.env.WATCHER_LOG || join(process.cwd(), 'watcher.log');
+  const _logFd = openSync(_logPath, 'a');
+  const _log = (msg) => { try { writeSync(_logFd, msg); } catch {} };
+  process.stderr.write = (data) => { _log(typeof data === 'string' ? data : String(data)); return true; };
+
   process.on('SIGTERM', () => {
-    process.stderr.write('[watcher] stopped\n');
+    _log('[watcher] stopped\n');
     process.exit(0);
   });
   pollLoop().catch(err => {
-    process.stderr.write(`[watcher] fatal: ${err.message}\n`);
+    _log(`[watcher] fatal: ${err.message}\n`);
     process.exit(1);
   });
 }
