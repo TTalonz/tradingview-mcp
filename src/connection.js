@@ -52,6 +52,31 @@ export async function getClient() {
     try {
       // Quick liveness check
       await client.Runtime.evaluate({ expression: '1', returnByValue: true });
+
+      // Active-chart recheck: read active symbols from ALL container windows and compare
+      // to the cached target's symbol. Reconnect if the user has switched charts.
+      const containerSymbols = await getAllContainerActiveSymbols();
+      if (containerSymbols.size > 0) {
+        const res = await client.Runtime.evaluate({
+          expression: `(function(){try{return window.TradingViewApi._activeChartWidgetWV.value().symbol();}catch(e){return null;}})()`,
+          returnByValue: true,
+        });
+        const cached = res.result?.value;
+        const cachedTicker = cached?.includes(':') ? cached.split(':').pop() : cached;
+
+        const cachedPresent = cached && (containerSymbols.has(cached) || containerSymbols.has(cachedTicker));
+        const nonCached = [...containerSymbols].filter(s => s !== cached && s !== cachedTicker);
+
+        // Rule 3: cached symbol gone from all containers — reconnect
+        // Rule 4: exactly one new symbol appeared — reconnect directly to it
+        if (!cachedPresent || nonCached.length === 1) {
+          try { await client.close(); } catch {}
+          client = null;
+          targetInfo = null;
+          return connect(nonCached.length === 1 ? nonCached[0] : null);
+        }
+      }
+
       return client;
     } catch {
       client = null;
@@ -61,11 +86,26 @@ export async function getClient() {
   return connect();
 }
 
-export async function connect() {
+// Returns a Set of bare tickers (e.g. {"DXY","ARBUSDT"}) from all container windows.
+async function getAllContainerActiveSymbols() {
+  const symbols = new Set();
+  try {
+    const resp = await fetch(`http://${CDP_HOST}:${CDP_PORT}/json/list`);
+    const targets = await resp.json();
+    const containers = targets.filter(t => t.type === 'page' && /tabbed-window/i.test(t.url));
+    for (const ct of containers) {
+      const sym = await probeEval(ct.id, `document.querySelector('.tab.active .symbol')?.textContent?.trim()`);
+      if (sym) symbols.add(sym);
+    }
+  } catch { /* non-fatal — return whatever was collected */ }
+  return symbols;
+}
+
+export async function connect(preferredSymbol = null) {
   let lastError;
   for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
     try {
-      const target = await findChartTarget();
+      const target = await findChartTarget(preferredSymbol);
       if (!target) {
         throw new Error('No TradingView chart target found. Is TradingView open with a chart?');
       }
@@ -87,13 +127,95 @@ export async function connect() {
   throw new Error(`CDP connection failed after ${MAX_RETRIES} attempts: ${lastError?.message}`);
 }
 
-async function findChartTarget() {
+async function probeEval(targetId, expression) {
+  let probe;
+  try {
+    probe = await CDP({ host: CDP_HOST, port: CDP_PORT, target: targetId });
+    await probe.Runtime.enable();
+    const result = await probe.Runtime.evaluate({ expression, returnByValue: true });
+    await probe.close();
+    return result.result?.value ?? null;
+  } catch {
+    try { await probe?.close(); } catch {}
+    return null;
+  }
+}
+
+async function findChartTarget(preferredSymbol = null) {
   const resp = await fetch(`http://${CDP_HOST}:${CDP_PORT}/json/list`);
   const targets = await resp.json();
-  // Prefer targets with tradingview.com/chart in the URL
-  return targets.find(t => t.type === 'page' && /tradingview\.com\/chart/i.test(t.url))
-    || targets.find(t => t.type === 'page' && /tradingview/i.test(t.url))
-    || null;
+
+  const chartTargets = targets.filter(t => t.type === 'page' && /tradingview\.com\/chart/i.test(t.url));
+  if (chartTargets.length === 0) {
+    return targets.find(t => t.type === 'page' && /tradingview/i.test(t.url)) || null;
+  }
+  if (chartTargets.length === 1) return chartTargets[0];
+
+  // Fast path: caller already knows the preferred ticker — scan for it directly.
+  if (preferredSymbol) {
+    for (const target of chartTargets) {
+      const sym = await probeEval(
+        target.id,
+        `(function(){try{return window.TradingViewApi._activeChartWidgetWV.value().symbol();}catch(e){return null;}})()`
+      );
+      if (!sym) continue;
+      const ticker = sym.includes(':') ? sym.split(':').pop() : sym;
+      if (ticker === preferredSymbol || sym === preferredSymbol) return target;
+    }
+  }
+
+  // Step 1: read active tab symbol from all tabbed-window containers.
+  const containerTargets = targets.filter(t => t.type === 'page' && /tabbed-window/i.test(t.url));
+  const activeSymbols = new Set();
+  for (const ct of containerTargets) {
+    const sym = await probeEval(ct.id, `document.querySelector('.tab.active .symbol')?.textContent?.trim()`);
+    if (sym) activeSymbols.add(sym);
+  }
+
+  // Step 2: find the chart target whose active symbol matches a container active symbol.
+  if (activeSymbols.size > 0) {
+    for (const target of chartTargets) {
+      const sym = await probeEval(
+        target.id,
+        `(function(){try{return window.TradingViewApi._activeChartWidgetWV.value().symbol();}catch(e){return null;}})()`
+      );
+      if (!sym) continue;
+      const ticker = sym.includes(':') ? sym.split(':').pop() : sym;
+      if (activeSymbols.has(ticker) || activeSymbols.has(sym)) return target;
+    }
+  }
+
+  // Fallback: prefer the chart target whose page has OS focus.
+  for (const target of chartTargets) {
+    const focused = await probeEval(target.id, 'document.hasFocus()');
+    if (focused === true) return target;
+  }
+
+  return chartTargets[0]; // last-resort fallback
+}
+
+/**
+ * Disconnect the cached client and reconnect directly to a specific CDP target ID.
+ * Used by tab_switch so subsequent tool calls read from the correct tab.
+ */
+export async function connectToTarget(targetId) {
+  if (client) {
+    try { await client.close(); } catch {}
+    client = null;
+    targetInfo = null;
+  }
+
+  const resp = await fetch(`http://${CDP_HOST}:${CDP_PORT}/json/list`);
+  const targets = await resp.json();
+  const target = targets.find(t => t.id === targetId);
+  if (!target) throw new Error(`CDP target ${targetId} not found`);
+
+  targetInfo = target;
+  client = await CDP({ host: CDP_HOST, port: CDP_PORT, target: targetId });
+  await client.Runtime.enable();
+  await client.Page.enable();
+  await client.DOM.enable();
+  return client;
 }
 
 export async function getTargetInfo() {
