@@ -827,17 +827,17 @@ export async function refreshGz({ degree, _deps } = {}) {
 }
 
 // ── Sync helpers (snap + clear + redraw) ──────────────────────────────────────
-export async function syncTdu({ degree, _deps } = {}) {
+export async function syncTdu({ degree, noClear = false, _deps } = {}) {
   await snapPivots({ _deps });
   await new Promise(r => setTimeout(r, 300));
-  await clearAlgoDrawings(_deps);
+  if (!noClear) await clearAlgoDrawings(_deps);
   return runTduAlgo({ degree, _deps });
 }
 
-export async function syncGz({ degree, _deps } = {}) {
+export async function syncGz({ degree, noClear = false, _deps } = {}) {
   await snapPivots({ _deps });
   await new Promise(r => setTimeout(r, 300));
-  await clearAlgoDrawings(_deps);
+  if (!noClear) await clearAlgoDrawings(_deps);
   return runGzPattern({ degree, _deps });
 }
 

@@ -95,15 +95,17 @@ register('draw', {
       description: 'Full sync: snap pivots → clear algo → redraw TDU on current timeframe',
       options: {
         degree: { type: 'string', description: 'Degree 1–4' },
+        'no-clear': { type: 'boolean', description: 'Skip clear-algo step (use when syncing multiple degrees)' },
       },
-      handler: (opts) => core.syncTdu({ degree: opts.degree != null ? Number(opts.degree) : undefined }),
+      handler: (opts) => core.syncTdu({ degree: opts.degree != null ? Number(opts.degree) : undefined, noClear: !!opts['no-clear'] }),
     }],
     ['gz-sync', {
       description: 'Full sync: snap pivots → clear algo → redraw GZ on current timeframe',
       options: {
         degree: { type: 'string', description: 'Degree 1–4' },
+        'no-clear': { type: 'boolean', description: 'Skip clear-algo step (use when syncing multiple degrees)' },
       },
-      handler: (opts) => core.syncGz({ degree: opts.degree != null ? Number(opts.degree) : undefined }),
+      handler: (opts) => core.syncGz({ degree: opts.degree != null ? Number(opts.degree) : undefined, noClear: !!opts['no-clear'] }),
     }],
     ['gz', {
       description: 'GZ pattern: 2 flags → TDU fib + GZ box (projected time)',
