@@ -7,3 +7,4 @@ discovery-log.json
 pivots.json
 watcher.pid
 watcher-state.json
+watcher.log

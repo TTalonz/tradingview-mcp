@@ -1,6 +1,6 @@
 import { register } from '../router.js';
 import * as core from '../../core/drawing.js';
-import { updateWatcherState, ensureWatcher, stopWatcher, readState, STATE_FILE } from '../../core/watcher.js';
+import { updateWatcherState, ensureWatcher, stopWatcher, readState, clearWatcherPairs, placeWatcherMarker, STATE_FILE } from '../../core/watcher.js';
 import { writeFileSync, existsSync } from 'fs';
 
 register('draw', {
@@ -43,8 +43,13 @@ register('draw', {
       handler: () => core.clearAll(),
     }],
     ['clear-algo', {
-      description: 'Remove all algo drawings, keep flags',
-      handler: () => core.clearAlgoDrawings(),
+      description: 'Remove all algo drawings, keep flags, clear watcher pattern pairs',
+      handler: async () => {
+        const result = await core.clearAlgoDrawings();
+        clearWatcherPairs();
+        await placeWatcherMarker();
+        return result;
+      },
     }],
     ['pivots-fix', {
       description: 'Reposition live flag objects to their saved pivot coords in pivots.json',
@@ -79,9 +84,11 @@ register('draw', {
       },
       handler: async (opts) => {
         const degree = opts.degree != null ? Number(opts.degree) : undefined;
+        await core.savePivots();
         const result = await core.runTduAlgo({ degree });
         updateWatcherState(degree ?? null, 'tdu');
         ensureWatcher();
+        await placeWatcherMarker();
         return result;
       },
     }],
@@ -92,9 +99,11 @@ register('draw', {
       },
       handler: async (opts) => {
         const degree = opts.degree != null ? Number(opts.degree) : undefined;
+        await core.savePivots();
         const result = await core.refreshTdu({ degree });
         updateWatcherState(degree ?? null, 'tdu');
         ensureWatcher();
+        await placeWatcherMarker();
         return result;
       },
     }],
@@ -105,9 +114,11 @@ register('draw', {
       },
       handler: async (opts) => {
         const degree = opts.degree != null ? Number(opts.degree) : undefined;
+        await core.savePivots();
         const result = await core.refreshGz({ degree });
         updateWatcherState(degree ?? null, 'gz');
         ensureWatcher();
+        await placeWatcherMarker();
         return result;
       },
     }],
@@ -119,9 +130,11 @@ register('draw', {
       },
       handler: async (opts) => {
         const degree = opts.degree != null ? Number(opts.degree) : undefined;
+        await core.savePivots();
         const result = await core.syncTdu({ degree, noClear: !!opts['no-clear'] });
         updateWatcherState(degree ?? null, 'tdu');
         ensureWatcher();
+        await placeWatcherMarker();
         return result;
       },
     }],
@@ -133,9 +146,11 @@ register('draw', {
       },
       handler: async (opts) => {
         const degree = opts.degree != null ? Number(opts.degree) : undefined;
+        await core.savePivots();
         const result = await core.syncGz({ degree, noClear: !!opts['no-clear'] });
         updateWatcherState(degree ?? null, 'gz');
         ensureWatcher();
+        await placeWatcherMarker();
         return result;
       },
     }],
@@ -143,27 +158,33 @@ register('draw', {
       description: 'GZ pattern: 2 flags → TDU fib + GZ box (projected time)',
       options: {
         degree: { type: 'string', description: 'Filter flags by degree color (1–4)' },
+        from:   { type: 'string', description: 'Skip first N flags (e.g. --from 3 to use P3+P4)' },
       },
       handler: async (opts) => {
         const degree = opts.degree != null ? Number(opts.degree) : undefined;
-        const result = await core.runGzPattern({ degree });
+        const from   = opts.from   != null ? Number(opts.from)   : 0;
+        await core.savePivots();
+        const result = await core.runGzPattern({ degree, from });
         updateWatcherState(degree ?? null, 'gz');
         ensureWatcher();
+        await placeWatcherMarker();
         return result;
       },
     }],
     ['plant', {
-      description: 'Start the timeframe watcher — auto-syncs patterns on TF change',
-      handler: () => {
+      description: 'Save current flag positions as pivot reference, then start watcher',
+      handler: async () => {
+        const saved = await core.savePivots();
         if (!existsSync(STATE_FILE)) writeFileSync(STATE_FILE, JSON.stringify({ pairs: [] }, null, 2), 'utf8');
         ensureWatcher();
-        return { success: true, action: 'plant', state: readState() };
+        await placeWatcherMarker();
+        return { success: true, action: 'plant', pivots_saved: saved.saved, state: readState() };
       },
     }],
     ['unplant', {
       description: 'Stop the timeframe watcher and clear watcher state',
-      handler: () => {
-        stopWatcher();
+      handler: async () => {
+        await stopWatcher();
         return { success: true, action: 'unplant' };
       },
     }],

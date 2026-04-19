@@ -200,8 +200,20 @@ export async function snapPivots({ _deps } = {}) {
   const apiPath = await getChartApi();
 
   const saved = loadPivotRecords();
-  const records = Object.values(saved);
+  const records = Object.values(saved).sort((a, b) => a.time - b.time);
   if (!records.length) return { success: true, snapped: [], missing: [], failed: [], message: 'No saved pivots' };
+
+  // Compute bounded search segment for each pivot using neighboring pivot times.
+  // Inner pivots: [prev.time, next.time). Edge pivots: mirrored gap on the open side.
+  const bounds = records.map((r, i) => {
+    const leftBound  = i > 0
+      ? records[i - 1].time
+      : r.time - (records[i + 1].time - r.time);
+    const rightBound = i < records.length - 1
+      ? records[i + 1].time
+      : r.time + (r.time - records[i - 1].time);
+    return { leftBound, rightBound };
+  });
 
   const { shapes } = await listDrawings(_deps);
   const liveFlags = new Set(shapes.filter(s => s.name === 'flag').map(s => s.id));
@@ -210,7 +222,10 @@ export async function snapPivots({ _deps } = {}) {
   const missing = [];
   const failed = [];
 
-  for (const record of records) {
+  for (let idx = 0; idx < records.length; idx++) {
+    const record = records[idx];
+    const { leftBound, rightBound } = bounds[idx];
+
     if (!liveFlags.has(record.id)) {
       missing.push(record.id);
       continue;
@@ -220,7 +235,8 @@ export async function snapPivots({ _deps } = {}) {
       (function() {
         var savedTime  = ${record.time};
         var savedPrice = ${record.price};
-        var windowEnd  = savedTime + 86400;
+        var leftBound  = ${leftBound};
+        var rightBound = ${rightBound};
 
         var col = window._exposed_chartWidgetCollection;
         if (!col) return 'no_col';
@@ -232,46 +248,76 @@ export async function snapPivots({ _deps } = {}) {
         var series = model.mainSeries ? model.mainSeries() : null;
         var bars   = series ? series.bars() : null;
 
-        // Scan bars within [savedTime, savedTime + 86400) — the original 1D candle window
-        // Find the bar where any OHLC is closest to savedPrice
-        var bestBar   = null;
-        var bestDelta = Infinity;
+        // Scan bars within [leftBound, rightBound) — bounded by neighboring pivot times.
+        // Primary selector: closest OHLC to savedPrice.
+        var candidates = [];
+        var bestDelta  = Infinity;
         if (bars) {
           var lastIdx = bars.lastIndex();
-          for (var i = lastIdx; i >= 0; i--) {
+          for (var i = lastIdx; i >= -2000; i--) {
             var v = bars.valueAt(i);
-            if (!v) continue;
+            if (!v) { if (i < 0) break; continue; }
             var bt = v[0];
-            if (bt >= windowEnd) continue;
-            if (bt < savedTime) break;
-            // v: [time, open, high, low, close]
+            if (bt >= rightBound) continue;
+            if (bt < leftBound) break;
             var d = Math.min(
               Math.abs(savedPrice - v[1]),
               Math.abs(savedPrice - v[2]),
               Math.abs(savedPrice - v[3]),
               Math.abs(savedPrice - v[4])
             );
-            if (d < bestDelta) { bestDelta = d; bestBar = v; }
+            if (d < bestDelta) bestDelta = d;
+            candidates.push({ v: v, d: d, idx: i });
           }
         }
+        // Tiebreaker: among bars within near-zero epsilon of bestDelta, pick closest in time to savedTime
+        var epsilon = bestDelta < 1e-10 ? 0 : Math.min(bestDelta * 0.01, 1e-6);
+        var bestBar = null;
+        var bestBarIdx = null;
+        var bestTimeDist = Infinity;
+        var windowSpan = rightBound - leftBound;
+        for (var j = 0; j < candidates.length; j++) {
+          var c = candidates[j];
+          if (c.d <= bestDelta + epsilon) {
+            var td = Math.abs(c.v[0] - savedTime);
+            if (td < bestTimeDist) { bestTimeDist = td; bestBar = c.v; bestBarIdx = c.idx; }
+          }
+        }
+        // Reject if best match is more than half the window away — wrong bar latched from scan edge
+        if (bestBar && bestTimeDist > windowSpan / 2) { bestBar = null; bestBarIdx = null; }
 
-        var targetTime = bestBar ? bestBar[0] : savedTime;
-        var barIndex   = ts && ts.timePointToIndex ? ts.timePointToIndex(targetTime) : null;
-
+        // Find the data source first so we can hide/show regardless of bar availability
         var sources = model.dataSources ? model.dataSources() : [];
+        var target = null;
         for (var i = 0; i < sources.length; i++) {
           var s = sources[i];
-          if (s.id && s.id() === ${JSON.stringify(record.id)}) {
-            if (typeof s.setPoint === 'function') {
-              var pt = { time: targetTime, price: savedPrice };
-              if (barIndex != null) pt.index = barIndex;
-              s.setPoint(0, pt);
-              if (typeof s.pointsetUpdated === 'function') s.pointsetUpdated();
-              if (typeof s._updateAllPaneViews === 'function') s._updateAllPaneViews();
-              return { ok: true, targetTime: targetTime, barIndex: barIndex, priceDelta: bestDelta };
-            }
-            return 'no_setPoint';
+          if (s.id && s.id() === ${JSON.stringify(record.id)}) { target = s; break; }
+        }
+
+        if (!bestBar) {
+          var fbIndex = ts && ts.timePointToIndex ? ts.timePointToIndex(savedTime) : null;
+          if (fbIndex != null && fbIndex >= 0 && target && typeof target.setPoint === 'function') {
+            target.setPoint(0, { time: savedTime, price: savedPrice, index: fbIndex });
+            if (typeof target.pointsetUpdated === 'function') target.pointsetUpdated();
+            if (typeof target._updateAllPaneViews === 'function') target._updateAllPaneViews();
+            return { ok: true, targetTime: savedTime, barIndex: fbIndex, priceDelta: 0, fallback: true };
           }
+          return { ok: false, reason: fbIndex == null ? 'no_timescale' : fbIndex < 0 ? 'bar_predates_history' : 'no_bars_in_window' };
+        }
+
+        var targetTime = bestBar[0];
+        var barIndex   = bestBarIdx;
+
+        if (target) {
+          if (typeof target.setPoint === 'function') {
+            var pt = { time: targetTime, price: savedPrice };
+            if (barIndex != null) pt.index = barIndex;
+            target.setPoint(0, pt);
+            if (typeof target.pointsetUpdated === 'function') target.pointsetUpdated();
+            if (typeof target._updateAllPaneViews === 'function') target._updateAllPaneViews();
+            return { ok: true, targetTime: targetTime, barIndex: barIndex, priceDelta: bestDelta };
+          }
+          return 'no_setPoint';
         }
         return 'not_found';
       })()
@@ -289,15 +335,6 @@ export async function snapPivots({ _deps } = {}) {
     } else {
       failed.push({ id: record.id, reason: moveResult });
     }
-  }
-
-  // Update pivots.json with snapped targetTimes so pattern draws anchor to the same bars
-  if (snapped.length) {
-    const updated = loadPivotRecords();
-    for (const s of snapped) {
-      if (updated[s.id]) updated[s.id].time = s.targetTime;
-    }
-    writePivotRecords(updated);
   }
 
   return { success: true, snapped, missing, failed };
@@ -325,7 +362,7 @@ const DEGREE_COLOR_MAP = {
   4: 'rgba(41, 98, 255, 1)',   // blue
 };
 
-export async function getFlagsByDegree({ degree, minCount = 3, _deps } = {}) {
+export async function getFlagsByDegree({ degree, minCount = 3, from = 0, attachedIds, snapPositions, _deps } = {}) {
   const { shapes } = await listDrawings(_deps);
   const flagShapes = shapes.filter(s => s.name === 'flag');
   const saved = loadPivotRecords();
@@ -333,10 +370,8 @@ export async function getFlagsByDegree({ degree, minCount = 3, _deps } = {}) {
   const flags = [];
   for (const { id } of flagShapes) {
     if (saved[id]) {
-      // Use saved pivot record — timeframe-stable
-      flags.push(saved[id]);
+      flags.push({ ...saved[id] });
     } else {
-      // Fall back to live TradingView read
       const props = await getProperties({ entity_id: id, _deps });
       if (props.points?.[0]) {
         flags.push({
@@ -348,11 +383,29 @@ export async function getFlagsByDegree({ degree, minCount = 3, _deps } = {}) {
       }
     }
   }
+
+  // Override times with snapped bar times for current TF — keeps anchors on real bars
+  if (snapPositions) {
+    for (const flag of flags) {
+      if (snapPositions[flag.id]) flag.time = snapPositions[flag.id].time;
+    }
+  }
+
   flags.sort((a, b) => a.time - b.time);
 
+  // When called from watcher redraw, restrict to pivots that successfully attached to a bar
+  const available = attachedIds ? flags.filter(f => attachedIds.has(f.id)) : flags;
+  const unavailable = attachedIds ? flags.filter(f => !attachedIds.has(f.id)).map(f => f.id) : [];
+
   if (degree == null) {
-    if (flags.length < minCount) throw new Error(`Need at least ${minCount} flag pivots, found ${flags.length}`);
-    return flags;
+    const sliced = available.slice(from);
+    if (sliced.length < minCount) {
+      const msg = unavailable.length
+        ? `Need at least ${minCount} flag pivots, found ${sliced.length} attached (${unavailable.join(', ')} unavailable on current TF)`
+        : `Need at least ${minCount} flag pivots, found ${sliced.length}`;
+      throw new Error(msg);
+    }
+    return sliced;
   }
 
   const N = Number(degree);
@@ -361,21 +414,27 @@ export async function getFlagsByDegree({ degree, minCount = 3, _deps } = {}) {
     throw new Error(`Degree ${N} not found — valid degrees are 1 (red), 2 (gray), 3 (yellow), 4 (blue)`);
   }
 
-  const filtered = flags.filter(f => f.color === targetColor);
+  const filtered = available.filter(f => f.color === targetColor);
 
   if (filtered.length < minCount) {
-    throw new Error(`Degree ${N} (color ${targetColor}) has only ${filtered.length} flag${filtered.length !== 1 ? 's' : ''}, need at least ${minCount}`);
+    const degUnavail = unavailable.filter(id => {
+      const r = saved[id];
+      return r && r.color === targetColor;
+    });
+    const msg = degUnavail.length
+      ? `Degree ${N} has only ${filtered.length} attached pivot${filtered.length !== 1 ? 's' : ''}, need ${minCount} (${degUnavail.join(', ')} unavailable on current TF — bars not loaded)`
+      : `Degree ${N} (color ${targetColor}) has only ${filtered.length} flag${filtered.length !== 1 ? 's' : ''}, need at least ${minCount}`;
+    throw new Error(msg);
   }
 
   return filtered;
 }
 
-export async function drawTduFib({ degree, _deps } = {}) {
+export async function drawTduFib({ degree, attachedIds, snapPositions, _deps } = {}) {
   const { evaluate, getChartApi } = _resolve(_deps);
   const apiPath = await getChartApi();
 
-  // 1. Read flags filtered by degree (or all if no degree)
-  const [P0, P1, P2] = await getFlagsByDegree({ degree, minCount: 3, _deps });
+  const [P0, P1, P2] = await getFlagsByDegree({ degree, minCount: 3, attachedIds, snapPositions, _deps });
 
   // 3. TDU fib anchors: anchor1=(P1.time, P0.price), anchor2=(P2.time, P1.price)
   const anchor1 = { time: P1.time, price: P0.price };
@@ -757,12 +816,9 @@ export async function runImpulse({ _deps } = {}) {
 
 // ── TDU algo — lean placement only ───────────────────────────────────────────
 // Read flags → sort → draw pitchfork + TDU fib. No tracking, no screenshots.
-export async function runTduAlgo({ degree, _deps } = {}) {
-  // 1. Read flags filtered by degree (or all if no degree)
-  const [P0, P1, P2] = await getFlagsByDegree({ degree, minCount: 3, _deps });
+export async function runTduAlgo({ degree, attachedIds, snapPositions, _deps } = {}) {
+  const [P0, P1, P2] = await getFlagsByDegree({ degree, minCount: 3, attachedIds, snapPositions, _deps });
 
-  // 2. Draw pitchfork: P0 = handle, P1 = left tine, P2 = right tine
-  //    level5 (coeff 1.0) enabled via setProperties — createMultipointShape ignores level arrays
   const pitchfork = await drawShape({ shape: 'pitchfork', points: [P0, P1, P2], _deps });
   if (pitchfork.entity_id) {
     const { evaluate: ev, getChartApi: gca } = _resolve(_deps);
@@ -785,8 +841,7 @@ export async function runTduAlgo({ degree, _deps } = {}) {
     `);
   }
 
-  // 3. Draw TDU fib (reads flags internally, same pivot order)
-  const fib = await drawTduFib({ degree, _deps });
+  const fib = await drawTduFib({ degree, attachedIds, snapPositions, _deps });
 
   // 4. GZ box: 0.5 → 0.65 fib levels, subdued yellow, no label
   //    fib goes anchor2.price → anchor1.price, so: level = anchor2.price - coeff × range
@@ -845,12 +900,11 @@ export async function syncGz({ degree, noClear = false, _deps } = {}) {
 // P0 = first flag, P1 = second flag (left to right)
 // anchor1 = (P1.time, P0.price), anchor2 = (P1.time + span, P1.price)
 // where span = P1.time - P0.time
-export async function runGzPattern({ degree, _deps } = {}) {
+export async function runGzPattern({ degree, from = 0, attachedIds, snapPositions, _deps } = {}) {
   const { evaluate, getChartApi } = _resolve(_deps);
   const apiPath = await getChartApi();
 
-  // 1. Read 2 flags (filtered by degree if provided)
-  const flags = await getFlagsByDegree({ degree, minCount: 2, _deps });
+  const flags = await getFlagsByDegree({ degree, minCount: 2, from, attachedIds, snapPositions, _deps });
   const [P0, P1] = flags;
 
   // 2. Compute anchors
