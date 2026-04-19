@@ -1,5 +1,7 @@
 import { register } from '../router.js';
 import * as core from '../../core/drawing.js';
+import { updateWatcherState, ensureWatcher, stopWatcher, readState, STATE_FILE } from '../../core/watcher.js';
+import { writeFileSync, existsSync } from 'fs';
 
 register('draw', {
   description: 'Drawing tools (shape, list, get, remove, clear)',
@@ -75,21 +77,39 @@ register('draw', {
       options: {
         degree: { type: 'string', description: 'Degree 1–4: filter flags by D-N color (derived left→right by first unique color)' },
       },
-      handler: (opts) => core.runTduAlgo({ degree: opts.degree != null ? Number(opts.degree) : undefined }),
+      handler: async (opts) => {
+        const degree = opts.degree != null ? Number(opts.degree) : undefined;
+        const result = await core.runTduAlgo({ degree });
+        updateWatcherState(degree ?? null, 'tdu');
+        ensureWatcher();
+        return result;
+      },
     }],
     ['tdu-refresh', {
       description: 'Clear algo drawings and redraw TDU from saved pivots',
       options: {
         degree: { type: 'string', description: 'Degree 1–4' },
       },
-      handler: (opts) => core.refreshTdu({ degree: opts.degree != null ? Number(opts.degree) : undefined }),
+      handler: async (opts) => {
+        const degree = opts.degree != null ? Number(opts.degree) : undefined;
+        const result = await core.refreshTdu({ degree });
+        updateWatcherState(degree ?? null, 'tdu');
+        ensureWatcher();
+        return result;
+      },
     }],
     ['gz-refresh', {
       description: 'Clear algo drawings and redraw GZ from saved pivots',
       options: {
         degree: { type: 'string', description: 'Degree 1–4' },
       },
-      handler: (opts) => core.refreshGz({ degree: opts.degree != null ? Number(opts.degree) : undefined }),
+      handler: async (opts) => {
+        const degree = opts.degree != null ? Number(opts.degree) : undefined;
+        const result = await core.refreshGz({ degree });
+        updateWatcherState(degree ?? null, 'gz');
+        ensureWatcher();
+        return result;
+      },
     }],
     ['tdu-sync', {
       description: 'Full sync: snap pivots → clear algo → redraw TDU on current timeframe',
@@ -97,7 +117,13 @@ register('draw', {
         degree: { type: 'string', description: 'Degree 1–4' },
         'no-clear': { type: 'boolean', description: 'Skip clear-algo step (use when syncing multiple degrees)' },
       },
-      handler: (opts) => core.syncTdu({ degree: opts.degree != null ? Number(opts.degree) : undefined, noClear: !!opts['no-clear'] }),
+      handler: async (opts) => {
+        const degree = opts.degree != null ? Number(opts.degree) : undefined;
+        const result = await core.syncTdu({ degree, noClear: !!opts['no-clear'] });
+        updateWatcherState(degree ?? null, 'tdu');
+        ensureWatcher();
+        return result;
+      },
     }],
     ['gz-sync', {
       description: 'Full sync: snap pivots → clear algo → redraw GZ on current timeframe',
@@ -105,14 +131,41 @@ register('draw', {
         degree: { type: 'string', description: 'Degree 1–4' },
         'no-clear': { type: 'boolean', description: 'Skip clear-algo step (use when syncing multiple degrees)' },
       },
-      handler: (opts) => core.syncGz({ degree: opts.degree != null ? Number(opts.degree) : undefined, noClear: !!opts['no-clear'] }),
+      handler: async (opts) => {
+        const degree = opts.degree != null ? Number(opts.degree) : undefined;
+        const result = await core.syncGz({ degree, noClear: !!opts['no-clear'] });
+        updateWatcherState(degree ?? null, 'gz');
+        ensureWatcher();
+        return result;
+      },
     }],
     ['gz', {
       description: 'GZ pattern: 2 flags → TDU fib + GZ box (projected time)',
       options: {
         degree: { type: 'string', description: 'Filter flags by degree color (1–4)' },
       },
-      handler: (opts) => core.runGzPattern({ degree: opts.degree != null ? Number(opts.degree) : undefined }),
+      handler: async (opts) => {
+        const degree = opts.degree != null ? Number(opts.degree) : undefined;
+        const result = await core.runGzPattern({ degree });
+        updateWatcherState(degree ?? null, 'gz');
+        ensureWatcher();
+        return result;
+      },
+    }],
+    ['plant', {
+      description: 'Start the timeframe watcher — auto-syncs patterns on TF change',
+      handler: () => {
+        if (!existsSync(STATE_FILE)) writeFileSync(STATE_FILE, JSON.stringify({ pairs: [] }, null, 2), 'utf8');
+        ensureWatcher();
+        return { success: true, action: 'plant', state: readState() };
+      },
+    }],
+    ['unplant', {
+      description: 'Stop the timeframe watcher and clear watcher state',
+      handler: () => {
+        stopWatcher();
+        return { success: true, action: 'unplant' };
+      },
     }],
     ['tdu-fib', {
       description: 'Draw TDU fib retracement from ordered flag pivots (P0, P1, P2)',
