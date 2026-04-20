@@ -700,7 +700,54 @@ export async function clearAlgoDrawings(_deps) {
 }
 
 // ── Impulse pattern level presets ────────────────────────────────────────────
+// fib_retracement uses 4-element arrays: [coeff, color, enabled, label]
 // fib_trend_ext uses 6-element arrays: [coeff, color, enabled, {}/null, {}/null, label]
+
+const IMPULSE_W2_FIB_OVERRIDES = {
+  fillBackground: false,
+  extendLines: false,
+  extendLinesLeft: false,
+  showCoeffs: true,
+  showPrices: false,
+  showText: true,
+  labelFontSize: 14,
+};
+
+const YELLOW = 'rgba(255,220,0,1)';
+const GRAY   = 'rgba(128,128,128,1)';
+
+// TDU algo fib level stack — reused by impulse Tool 3
+const IMPULSE_W2_LEVEL_PROPERTIES = {
+  level1:  [0,     GRAY,   false, ''],
+  level2:  [0.236, GRAY,   false, ''],
+  level3:  [0.382, GRAY,   false, ''],
+  level4:  [0.5,   YELLOW, true,  ''],
+  level5:  [0.618, YELLOW, true,  ''],
+  level6:  [0.786, GRAY,   true,  ''],
+  level7:  [1,     GRAY,   false, ''],
+  level12: [0.65,  YELLOW, true,  ''],
+};
+
+const IMPULSE_W4_EXT_LEVELS = {
+  level1:  [0,     'rgba(128,128,128,1)', false, null, null, ''],
+  level2:  [0.236, 'rgba(128,128,128,1)', false, null, null, ''],
+  level3:  [0.382, 'rgba(128,128,128,1)', false, null, null, ''],
+  level4:  [0.5,   'rgba(128,128,128,1)', false, null, null, ''],
+  level5:  [0.618, 'rgba(128,128,128,1)', false, null, null, ''],
+  level6:  [0.786, 'rgba(128,128,128,1)', false, null, null, ''],
+  level7:  [1.0,   'rgba(128,128,128,1)', true,  null, null, ''],
+  level8:  [1.272, 'rgba(128,128,128,1)', true,  null, null, ''],
+  level9:  [1.618, 'rgba(255,220,0,1)',   true,  null, null, ''],
+  level10: [1.75,  'rgba(128,128,128,1)', false, null, null, ''],
+  level11: [2.0,   'rgba(128,128,128,1)', true,  null, null, ''],
+  level13: [0.886, 'rgba(128,128,128,1)', false, null, null, ''],
+  level15: [1.382, 'rgba(128,128,128,1)', false, null, null, ''],
+  level16: [2.5,   'rgba(128,128,128,1)', false, null, null, ''],
+  level17: [2.618, 'rgba(128,128,128,1)', true,  null, null, ''],
+  level19: [3.414, 'rgba(128,128,128,1)', false, null, null, ''],
+  level20: [3.618, 'rgba(128,128,128,1)', false, null, null, ''],
+  level21: [3,     'rgba(128,128,128,1)', false, null, null, ''],
+};
 
 const IMPULSE_W3_EXT_LEVELS = {
   level1:  [0,     'rgba(128,128,128,1)', false, null, null, ''],
@@ -777,20 +824,73 @@ export async function runImpulse({ _deps } = {}) {
   // Tool 2 — Base Channel: P0 P2 P1
   const t2 = await drawShape({ shape: 'parallel_channel', points: [P0, P2, P1], _deps });
 
-  // Tool 3 — Wave 2 Fib: anchor1=(P1.time, P0.price), anchor2=(P2.time+1bar, P1.price)
+  // Tool 3 — Wave 2 Fib: anchor1=(P2.time, P0.price), anchor2=(P2.time+2bars, P1.price)
   const t3 = await drawShape({
     shape: 'fib_retracement',
-    points: [{ time: P1.time, price: P0.price }, { time: P2.time + barSeconds, price: P1.price }],
+    points: [{ time: P2.time, price: P0.price }, { time: P2.time + 2 * barSeconds, price: P1.price }],
+    overrides: JSON.stringify(IMPULSE_W2_FIB_OVERRIDES),
     _deps,
   });
+  if (t3.entity_id) await evaluate(`
+    (function() {
+      var shape = ${apiPath}.getShapeById(${JSON.stringify(t3.entity_id)});
+      if (shape && typeof shape.setProperties === 'function') {
+        shape.setProperties(${JSON.stringify(IMPULSE_W2_LEVEL_PROPERTIES)});
+      }
+    })()
+  `);
 
-  // Tool 4 — Wave 3 Extension: anchor1=(P1.time, P0.price), anchor2=P1, anchor3=P2
+  // Tool 3 rectangle — subdued yellow box: P2-5bars to P2, between 0.5 and 0.618 fib levels
+  {
+    const fibRange = P1.price - P0.price;
+    const lvl50  = P1.price - 0.5   * fibRange;
+    const lvl618 = P1.price - 0.618 * fibRange;
+    const rectTop = Math.max(lvl50, lvl618);
+    const rectBot = Math.min(lvl50, lvl618);
+    const rectOverrides = JSON.stringify({
+      backgroundColor: 'rgba(255,220,0,0.12)',
+      color: 'rgba(255,220,0,0.4)',
+      linewidth: 1,
+    });
+    await drawShape({
+      shape: 'rectangle',
+      points: [
+        { time: P2.time - 5 * barSeconds, price: rectTop },
+        { time: P2.time,                  price: rectBot },
+      ],
+      overrides: rectOverrides,
+      _deps,
+    });
+  }
+
+  // Tool 4 — Wave 3 Extension: anchor1=(P2.time,P0.price), anchor2=(P2.time,P1.price), anchor3=(P2.time-2bars,P2.price)
   const t4 = await drawShape({
     shape: 'fib_trend_ext',
-    points: [{ time: P1.time, price: P0.price }, P1, P2],
+    points: [
+      { time: P2.time, price: P0.price },
+      { time: P2.time, price: P1.price },
+      { time: P2.time - 2 * barSeconds, price: P2.price },
+    ],
+    overrides: JSON.stringify({ labelFontSize: 14, horzLabelsAlign: 'left' }),
     _deps,
   });
-  if (t4.entity_id) await applyExtLevels(t4.entity_id, IMPULSE_W3_EXT_LEVELS, apiPath, evaluate);
+  if (t4.entity_id) await applyExtLevels(t4.entity_id, IMPULSE_W4_EXT_LEVELS, apiPath, evaluate);
+
+  // Tool 4 rectangle — subdued yellow, tight around 1.618, 3 bars each side of P2
+  {
+    const base = P1.price - P0.price;
+    const top  = P2.price + 1.68 * base;
+    const bot  = P2.price + 1.56 * base;
+    await drawShape({
+      shape: 'rectangle',
+      points: [
+        { time: P2.time - 3 * barSeconds, price: top },
+        { time: P2.time + 3 * barSeconds, price: bot },
+      ],
+      overrides: JSON.stringify({ backgroundColor: 'rgba(255,220,0,0.12)', color: 'rgba(255,220,0,0.4)', linewidth: 1 }),
+      _deps,
+    });
+  }
 
   // Tool 5 — Wave 4 Fib: anchor1=(P3.time, P2.price), anchor2=P3
   const t5 = await drawShape({
